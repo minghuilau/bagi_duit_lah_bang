@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../hooks/useAuth';
-import { createRoom, joinRoom, createOrder, subscribeToOrders, subscribeToParticipants, toggleItemClaim } from '../lib/roomOps';
+import { createRoom, joinRoom, createOrder, subscribeToOrders, subscribeToParticipants, toggleItemClaim, closeRoom, subscribeToRoom, markDebtSettled } from '../lib/roomOps';
 import { Room, Order, Participant } from '../types';
 import { getAuth, updateProfile } from 'firebase/auth'; 
 
@@ -19,7 +19,7 @@ export default function LandingPage() {
   const [insideDashboard, setInsideDashboard] = useState(false);
 
   // Dashboard View States
-  const [dashboardView, setDashboardView] = useState<'lobby' | 'menu' | 'scan' | 'manual' | 'claim'>('lobby');
+  const [dashboardView, setDashboardView] = useState<'lobby' | 'menu' | 'scan' | 'manual' | 'claim' | 'summary'>('lobby');
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   
   const [orders, setOrders] = useState<Order[]>([]); 
@@ -31,8 +31,9 @@ export default function LandingPage() {
   const [manualOrderName, setManualOrderName] = useState('New Order');
   const [manualItems, setManualItems] = useState([{ name: '', price: '' }]);
   const [manualTaxPercentage, setManualTaxPercentage] = useState('');
-  const [manualPaidBy, setManualPaidBy] = useState(''); // NEW: Tracks the payer
+  const [manualPaidBy, setManualPaidBy] = useState(''); 
   const [isSavingOrder, setIsSavingOrder] = useState(false);
+  const [isClosing, setIsClosing] = useState(false);
 
   // Guest Login States
   const [showGuestInput, setShowGuestInput] = useState(false);
@@ -44,12 +45,86 @@ export default function LandingPage() {
     if (insideDashboard && activeRoom) {
       const unsubOrders = subscribeToOrders(activeRoom.id, setOrders);
       const unsubParts = subscribeToParticipants(activeRoom.id, setParticipants);
+      const unsubRoom = subscribeToRoom(activeRoom.id, (updatedRoom) => {
+        setActiveRoom(updatedRoom);
+        // We no longer force everyone to the summary page immediately, 
+        // they can navigate there naturally using the new Settle Up button.
+      });
+      
       return () => {
         unsubOrders();
         unsubParts();
+        unsubRoom();
       };
     }
-  }, [insideDashboard, activeRoom]);
+  }, [insideDashboard, activeRoom?.id]);
+
+  // Math Engine
+  const calculateBalances = () => {
+    const balances: Record<string, { name: string, paid: number, consumed: number }> = {};
+    
+    participants.forEach(p => {
+      balances[p.id] = { name: p.name, paid: 0, consumed: 0 };
+    });
+
+    orders.forEach(order => {
+      if (balances[order.paidBy]) {
+        balances[order.paidBy].paid += order.total;
+      }
+
+      const taxMultiplier = 1 + (order.taxPercentage / 100);
+      
+      order.items?.forEach(item => {
+        if (item.claimedBy && item.claimedBy.length > 0) {
+          const costWithTax = item.price * taxMultiplier;
+          const costPerPerson = costWithTax / item.claimedBy.length;
+          
+          item.claimedBy.forEach(userId => {
+            if (balances[userId]) {
+              balances[userId].consumed += costPerPerson;
+            }
+          });
+        }
+      });
+    });
+
+    const finalBalances = Object.entries(balances).map(([userId, data]) => ({
+      userId,
+      name: data.name,
+      paid: data.paid,
+      consumed: data.consumed,
+      net: data.paid - data.consumed
+    })).sort((a, b) => b.net - a.net);
+
+    const transactions = [];
+    const debtors = finalBalances.filter(b => b.net < -0.01).map(b => ({ ...b, debt: Math.abs(b.net) }));
+    const creditors = finalBalances.filter(b => b.net > 0.01).map(b => ({ ...b, credit: b.net }));
+
+    let d = 0;
+    let c = 0;
+
+    while (d < debtors.length && c < creditors.length) {
+      const debtor = debtors[d];
+      const creditor = creditors[c];
+      const amount = Math.min(debtor.debt, creditor.credit);
+      
+      transactions.push({
+        fromId: debtor.userId,
+        fromName: debtor.name,
+        toId: creditor.userId,
+        toName: creditor.name,
+        amount: amount
+      });
+
+      debtor.debt -= amount;
+      creditor.credit -= amount;
+
+      if (debtor.debt < 0.01) d++;
+      if (creditor.credit < 0.01) c++;
+    }
+
+    return { balances: finalBalances, transactions };
+  };
 
   // Functions
   const handleGuestLogin = async () => {
@@ -106,7 +181,7 @@ export default function LandingPage() {
       const room = await joinRoom(freshUser, joinCode); 
       if (room) {
         setActiveRoom(room);
-        setDashboardView('lobby');
+        setDashboardView(room.status === 'closed' ? 'summary' : 'lobby');
         setInsideDashboard(true);
       } else {
         setError('Active room not found. Check the code!');
@@ -126,6 +201,21 @@ export default function LandingPage() {
     setRoomName('');
     setError('');
     setDashboardView('lobby');
+  };
+
+  const handleCloseSession = async () => {
+    if (!activeRoom) return;
+    if (!confirm("Are you sure? This will lock the room and prevent anyone from adding more items.")) return;
+    
+    setIsClosing(true);
+    try {
+      await closeRoom(activeRoom.id);
+    } catch (err) {
+      console.error("Failed to close room:", err);
+      alert("Failed to close the session.");
+    } finally {
+      setIsClosing(false);
+    }
   };
 
   const addManualItemRow = () => setManualItems([...manualItems, { name: '', price: '' }]);
@@ -167,7 +257,7 @@ export default function LandingPage() {
         roomId: activeRoom.id,
         name: manualOrderName,
         uploadedBy: user.uid,
-        paidBy: manualPaidBy || user.uid, // NEW: Saves the selected payer
+        paidBy: manualPaidBy || user.uid,
         taxPercentage: taxPercentage,
         total: parseFloat(finalTotal.toFixed(2)),
         items: validItems,
@@ -217,7 +307,7 @@ export default function LandingPage() {
 
           setManualItems(safeItems);
           setManualTaxPercentage(data.taxPercentage?.toString() || '0'); 
-          setManualPaidBy(user?.uid || ''); // Default to current user
+          setManualPaidBy(user?.uid || '');
           setDashboardView('manual');
         } else {
           console.error("Scanning failed:", data?.error || 'Unknown error');
@@ -290,6 +380,154 @@ export default function LandingPage() {
               </div>
             </div>
           )}
+        </div>
+      </main>
+    );
+  }
+
+  // State 4: Room Dashboard (Summary View)
+  if (insideDashboard && activeRoom && dashboardView === 'summary') {
+    const { balances: finalBalances, transactions } = calculateBalances();
+    const myBalance = finalBalances.find(b => b.userId === user.uid);
+
+    return (
+      <main className="min-h-screen bg-gray-50 p-6 pb-24">
+        <div className="max-w-md mx-auto">
+          <button 
+            onClick={() => activeRoom.status === 'closed' ? handleLeaveRoom() : setDashboardView('menu')} 
+            className="mb-4 text-sm font-medium text-gray-500 hover:text-gray-800 flex items-center"
+          >
+            ← {activeRoom.status === 'closed' ? 'Exit Session' : 'Back to Menu'}
+          </button>
+
+          <div className="bg-white rounded-2xl p-8 shadow-sm border border-gray-100 mb-6 text-center">
+            {activeRoom.status === 'closed' ? (
+              <span className="text-xs bg-gray-100 text-gray-500 font-bold px-3 py-1.5 rounded-full tracking-wider uppercase">
+                Session Closed
+              </span>
+            ) : (
+              <span className="text-xs bg-blue-100 text-blue-700 font-bold px-3 py-1.5 rounded-full tracking-wider uppercase flex items-center justify-center gap-1.5 w-max mx-auto">
+                <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse"></span>
+                Live Split
+              </span>
+            )}
+            <h1 className="text-3xl font-black text-gray-900 mt-4 mb-2">Final Split</h1>
+            <p className="text-gray-500 text-sm">All taxes and items have been calculated.</p>
+            
+            <div className="mt-8 pt-8 border-t border-gray-100">
+              <p className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-2">Your Summary</p>
+              {myBalance && myBalance.net < -0.01 ? (
+                <div>
+                  <p className="text-4xl font-black text-red-500 mb-1">RM {Math.abs(myBalance.net).toFixed(2)}</p>
+                  <p className="text-sm text-gray-500 font-medium">Total amount you owe</p>
+                </div>
+              ) : myBalance && myBalance.net > 0.01 ? (
+                <div>
+                  <p className="text-4xl font-black text-green-500 mb-1">RM {myBalance.net.toFixed(2)}</p>
+                  <p className="text-sm text-gray-500 font-medium">Total amount you receive</p>
+                </div>
+              ) : (
+                <div>
+                  <p className="text-4xl font-black text-gray-800 mb-1">RM 0.00</p>
+                  <p className="text-sm text-gray-500 font-medium">You are perfectly settled up</p>
+                </div>
+              )}
+              
+              {myBalance && (
+                <div className="flex justify-between items-center bg-gray-50 p-4 rounded-xl mt-6 text-sm">
+                  <div className="text-left">
+                    <p className="text-gray-500">You consumed</p>
+                    <p className="font-bold text-gray-900">RM {myBalance.consumed.toFixed(2)}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-gray-500">You paid upfront</p>
+                    <p className="font-bold text-gray-900">RM {myBalance.paid.toFixed(2)}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* NEW: Host Lock Button moved inside Summary */}
+            {activeRoom.status === 'active' && activeRoom.hostId === user.uid && (
+              <div className="mt-8 pt-6 border-t border-gray-100">
+                <button 
+                  onClick={handleCloseSession}
+                  disabled={isClosing}
+                  className="w-full bg-red-600 text-white px-6 py-4 rounded-xl font-bold hover:bg-red-700 transition-colors shadow-sm disabled:bg-red-400"
+                >
+                  {isClosing ? 'Locking Room...' : 'Lock Room & Finalize'}
+                </button>
+                <p className="text-center text-xs text-gray-400 mt-2">This prevents anyone from adding more items.</p>
+              </div>
+            )}
+          </div>
+
+          {/* Settle Up Instructions */}
+          {transactions.length > 0 && (
+            <div className="mb-8">
+              <h2 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3 px-1">How to Settle Up</h2>
+              <div className="space-y-3">
+                {transactions.map((tx, idx) => {
+                  const txId = `${tx.fromId}_${tx.toId}_${idx}`;
+                  const isSettled = activeRoom.settledDebts?.includes(txId);
+                  const amIInvolved = tx.fromId === user.uid || tx.toId === user.uid;
+                  
+                  return (
+                    <div key={idx} className={`bg-white p-5 rounded-2xl shadow-sm border ${amIInvolved && !isSettled ? 'border-blue-300 ring-2 ring-blue-50' : 'border-gray-100'} flex justify-between items-center transition-all ${isSettled ? 'opacity-50 grayscale' : ''}`}>
+                      <div className="flex items-center gap-3">
+                        <div className="flex-1">
+                          <p className={`font-medium ${isSettled ? 'text-gray-500 line-through' : 'text-gray-900'}`}>
+                            <span className={tx.fromId === user.uid && !isSettled ? "font-bold text-blue-600" : "font-bold"}>{tx.fromName}</span> pays <span className={tx.toId === user.uid && !isSettled ? "font-bold text-blue-600" : "font-bold"}>{tx.toName}</span>
+                          </p>
+                        </div>
+                      </div>
+                      <div className="text-right flex items-center gap-4">
+                        <span className={`font-black text-lg ${isSettled ? 'text-gray-400' : 'text-gray-900'}`}>RM {tx.amount.toFixed(2)}</span>
+                        
+                        {!isSettled && (amIInvolved || activeRoom.hostId === user.uid) && (
+                          <button 
+                            onClick={() => markDebtSettled(activeRoom.id, txId)}
+                            className="bg-green-100 text-green-700 hover:bg-green-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors"
+                          >
+                            Mark Paid
+                          </button>
+                        )}
+                        {isSettled && (
+                          <span className="text-green-600 font-bold text-sm flex items-center gap-1">
+                            ✓ Paid
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <h2 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3 px-1">Group Ledger</h2>
+          <div className="space-y-3">
+            {finalBalances.map((balance) => {
+              const isMe = balance.userId === user.uid;
+              return (
+                <div key={balance.userId} className={`bg-white p-5 rounded-2xl shadow-sm border ${isMe ? 'border-gray-300 ring-2 ring-gray-100' : 'border-gray-100'} flex justify-between items-center`}>
+                  <div>
+                    <h3 className="font-bold text-gray-900">{balance.name} {isMe && <span className="text-gray-400 font-normal">(You)</span>}</h3>
+                    <p className="text-xs text-gray-500 mt-0.5">Consumed RM {balance.consumed.toFixed(2)}</p>
+                  </div>
+                  <div className="text-right">
+                    {balance.net > 0.01 ? (
+                      <span className="text-green-600 font-bold bg-green-50 px-3 py-1 rounded-lg text-sm">Receives RM {balance.net.toFixed(2)}</span>
+                    ) : balance.net < -0.01 ? (
+                      <span className="text-red-500 font-bold bg-red-50 px-3 py-1 rounded-lg text-sm">Owes RM {Math.abs(balance.net).toFixed(2)}</span>
+                    ) : (
+                      <span className="text-gray-400 font-bold bg-gray-50 px-3 py-1 rounded-lg text-sm">Settled</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       </main>
     );
@@ -379,8 +617,8 @@ export default function LandingPage() {
   // State 4: Room Dashboard (Menu, Scanner, Manual, Claim)
   if (insideDashboard && activeRoom && dashboardView !== 'lobby') {
     return (
-      <main className="min-h-screen bg-gray-50 p-6 pb-24">
-        <div className="max-w-md mx-auto">
+      <main className="min-h-screen bg-gray-50 p-6 pb-24 relative">
+        <div className="max-w-md mx-auto pb-16">
           {dashboardView === 'menu' && (
             <button onClick={() => setDashboardView('lobby')} className="mb-4 text-sm font-medium text-gray-500 hover:text-gray-800 flex items-center">
               ← Back to Lobby
@@ -558,7 +796,6 @@ export default function LandingPage() {
                   <button onClick={addManualItemRow} className="mt-3 text-sm font-semibold text-blue-600 hover:text-blue-800">+ Add another item</button>
                 </div>
 
-                {/* NEW: Paid By Selector */}
                 <div className="border-t pt-5 mt-2">
                   <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Paid By</label>
                   <select 
@@ -628,8 +865,21 @@ export default function LandingPage() {
               </div>
             </div>
           )}
-
         </div>
+
+        {/* Universal Settle Up Button */}
+        {dashboardView === 'menu' && (
+          <div className="fixed bottom-0 left-0 right-0 p-4 bg-white border-t border-gray-200 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] z-50">
+            <div className="max-w-md mx-auto">
+              <button 
+                onClick={() => setDashboardView('summary')}
+                className="w-full bg-black text-white px-6 py-4 rounded-xl font-bold hover:bg-gray-800 transition-colors shadow-sm flex justify-center items-center gap-2 text-lg"
+              >
+                Settle up →
+              </button>
+            </div>
+          </div>
+        )}
       </main>
     );
   }

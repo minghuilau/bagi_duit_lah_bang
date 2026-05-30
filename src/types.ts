@@ -5,6 +5,7 @@ export interface Room {
   hostId: string;
   status: 'active' | 'closed';
   createdAt: number;
+  settledDebts?: string[];
 }
 
 export interface Order {

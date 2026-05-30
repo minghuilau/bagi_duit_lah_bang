@@ -1,4 +1,5 @@
-import { collection, doc, setDoc, query, where, getDocs, addDoc, onSnapshot, orderBy, updateDoc } from 'firebase/firestore';
+// src/lib/roomOps.ts
+import { collection, doc, setDoc, query, where, getDocs, addDoc, onSnapshot, orderBy, updateDoc, arrayUnion } from 'firebase/firestore';
 import { db } from './firebase';
 import { Room, Order, Participant } from '../types';
 
@@ -50,7 +51,8 @@ export async function createRoom(user: any, roomName: string): Promise<Room> {
     joinCode: roomCode,
     hostId: user.uid,
     status: 'active',
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    settledDebts: [] // Initialize as empty array
   };
 
   await setDoc(newRoomRef, newRoom);
@@ -101,12 +103,10 @@ export function subscribeToParticipants(roomId: string, callback: (participants:
   });
 }
 
-// --- NEW: Toggle an item's claim status ---
 export async function toggleItemClaim(orderId: string, items: any[], itemIndex: number, userId: string) {
   const orderRef = doc(db, 'orders', orderId);
   const newItems = [...items];
   
-  // Failsafe in case older items don't have the array yet
   if (!newItems[itemIndex].claimedBy) {
     newItems[itemIndex].claimedBy = [];
   }
@@ -114,13 +114,32 @@ export async function toggleItemClaim(orderId: string, items: any[], itemIndex: 
   const hasClaimed = newItems[itemIndex].claimedBy.includes(userId);
   
   if (hasClaimed) {
-    // Unclaim it: Filter the user ID out
     newItems[itemIndex].claimedBy = newItems[itemIndex].claimedBy.filter((id: string) => id !== userId);
   } else {
-    // Claim it: Push the user ID in
     newItems[itemIndex].claimedBy.push(userId);
   }
   
-  // Update the entire items array in Firestore instantly
   await updateDoc(orderRef, { items: newItems });
+}
+
+export async function closeRoom(roomId: string) {
+  const roomRef = doc(db, 'rooms', roomId);
+  await updateDoc(roomRef, { status: 'closed' });
+}
+
+export function subscribeToRoom(roomId: string, callback: (room: Room) => void) {
+  const roomRef = doc(db, 'rooms', roomId);
+  return onSnapshot(roomRef, (doc) => {
+    if (doc.exists()) {
+      callback({ id: doc.id, ...doc.data() } as Room);
+    }
+  });
+}
+
+// Mark a debt as settled 
+export async function markDebtSettled(roomId: string, debtId: string) {
+  const roomRef = doc(db, 'rooms', roomId);
+  await updateDoc(roomRef, {
+    settledDebts: arrayUnion(debtId)
+  });
 }
