@@ -2,13 +2,14 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../hooks/useAuth';
-import { createRoom, joinRoom, createOrder, subscribeToOrders } from '../lib/roomOps';
-import { Room, Order } from '../types';
+import { createRoom, joinRoom, createOrder, subscribeToOrders, subscribeToParticipants, toggleItemClaim } from '../lib/roomOps';
+import { Room, Order, Participant } from '../types';
+import { getAuth, updateProfile } from 'firebase/auth'; 
 
 export default function LandingPage() {
   const { user, loading, loginAnon, loginGoogle, logout } = useAuth();
   
-  // Main State
+  // Core States
   const [joinCode, setJoinCode] = useState('');
   const [roomName, setRoomName] = useState('');
   const [activeRoom, setActiveRoom] = useState<Room | null>(null);
@@ -18,8 +19,11 @@ export default function LandingPage() {
   const [insideDashboard, setInsideDashboard] = useState(false);
 
   // Dashboard View States
-  const [dashboardView, setDashboardView] = useState<'lobby' | 'menu' | 'scan' | 'manual'>('lobby');
+  const [dashboardView, setDashboardView] = useState<'lobby' | 'menu' | 'scan' | 'manual' | 'claim'>('lobby');
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
+  
   const [orders, setOrders] = useState<Order[]>([]); 
+  const [participants, setParticipants] = useState<Participant[]>([]);
 
   // Scanning & Manual States
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -27,28 +31,48 @@ export default function LandingPage() {
   const [manualOrderName, setManualOrderName] = useState('New Order');
   const [manualItems, setManualItems] = useState([{ name: '', price: '' }]);
   const [manualTaxPercentage, setManualTaxPercentage] = useState('');
+  const [manualPaidBy, setManualPaidBy] = useState(''); // NEW: Tracks the payer
   const [isSavingOrder, setIsSavingOrder] = useState(false);
 
-  // Testing for lobby UI
-  const mockUsers = [
-    { id: '1', name: user?.displayName || 'Ahmad Hafiz', isHost: true, method: 'Google', initials: 'AH', color: 'bg-emerald-600' },
-    { id: '2', name: 'Aina Razak', isHost: false, method: 'Google', initials: 'AR', color: 'bg-indigo-600' },
-    { id: '3', name: 'Guest Abang', isHost: false, method: 'anonymous', initials: 'GA', color: 'bg-orange-500' },
-    { id: '4', name: 'Syafiq', isHost: false, method: 'Google', initials: 'S', color: 'bg-amber-600' },
-    { id: '5', name: 'Nurul', isHost: false, method: 'anonymous', initials: 'N', color: 'bg-rose-700' },
-  ];
+  // Guest Login States
+  const [showGuestInput, setShowGuestInput] = useState(false);
+  const [guestName, setGuestName] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-  // Real-time Order Sync 
+  // Real-time Sync
   useEffect(() => {
     if (insideDashboard && activeRoom) {
-      const unsubscribe = subscribeToOrders(activeRoom.id, (fetchedOrders) => {
-        setOrders(fetchedOrders);
-      });
-      return () => unsubscribe();
+      const unsubOrders = subscribeToOrders(activeRoom.id, setOrders);
+      const unsubParts = subscribeToParticipants(activeRoom.id, setParticipants);
+      return () => {
+        unsubOrders();
+        unsubParts();
+      };
     }
   }, [insideDashboard, activeRoom]);
 
-  // Functions 
+  // Functions
+  const handleGuestLogin = async () => {
+    if (!guestName.trim()) {
+      setError("Please enter a name first!");
+      return;
+    }
+    setIsLoggingIn(true);
+    setError('');
+    try {
+      await loginAnon(); 
+      const auth = getAuth();
+      if (auth.currentUser) {
+        await updateProfile(auth.currentUser, { displayName: guestName.trim() });
+      }
+    } catch (err) {
+      console.error(err);
+      setError("Failed to login as guest.");
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
   const handleCreateRoom = async () => {
     if (!user) return;
     if (!roomName.trim()) {
@@ -58,7 +82,9 @@ export default function LandingPage() {
     setCreating(true);
     setError('');
     try {
-      const room = await createRoom(user.uid, roomName);
+      const auth = getAuth();
+      const freshUser = auth.currentUser || user; 
+      const room = await createRoom(freshUser, roomName); 
       setActiveRoom(room);
       setDashboardView('lobby');
       setInsideDashboard(true);
@@ -75,7 +101,9 @@ export default function LandingPage() {
     setJoining(true);
     setError('');
     try {
-      const room = await joinRoom(joinCode);
+      const auth = getAuth();
+      const freshUser = auth.currentUser || user;
+      const room = await joinRoom(freshUser, joinCode); 
       if (room) {
         setActiveRoom(room);
         setDashboardView('lobby');
@@ -100,7 +128,6 @@ export default function LandingPage() {
     setDashboardView('lobby');
   };
 
-  // Manual Entry Helpers 
   const addManualItemRow = () => setManualItems([...manualItems, { name: '', price: '' }]);
   const updateManualItem = (index: number, field: 'name' | 'price', value: string) => {
     const newItems = [...manualItems];
@@ -113,7 +140,6 @@ export default function LandingPage() {
     setManualItems(newItems);
   };
 
-  // Save Order Logic 
   const handleSaveOrder = async () => {
     if (!user || !activeRoom) return;
     
@@ -141,6 +167,7 @@ export default function LandingPage() {
         roomId: activeRoom.id,
         name: manualOrderName,
         uploadedBy: user.uid,
+        paidBy: manualPaidBy || user.uid, // NEW: Saves the selected payer
         taxPercentage: taxPercentage,
         total: parseFloat(finalTotal.toFixed(2)),
         items: validItems,
@@ -151,6 +178,7 @@ export default function LandingPage() {
       setManualOrderName('New Order');
       setManualItems([{ name: '', price: '' }]);
       setManualTaxPercentage('');
+      setManualPaidBy(user.uid);
     } catch (err) {
       console.error("Failed to save order:", err);
       alert("Failed to save order. Check console.");
@@ -159,7 +187,6 @@ export default function LandingPage() {
     }
   };
 
-  // AI Scanner Logic 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -190,6 +217,7 @@ export default function LandingPage() {
 
           setManualItems(safeItems);
           setManualTaxPercentage(data.taxPercentage?.toString() || '0'); 
+          setManualPaidBy(user?.uid || ''); // Default to current user
           setDashboardView('manual');
         } else {
           console.error("Scanning failed:", data?.error || 'Unknown error');
@@ -212,27 +240,67 @@ export default function LandingPage() {
     );
   }
 
-  // --- State 1: Login ---
+  // State 1: Login
   if (!user) {
     return (
       <main className="min-h-screen flex flex-col items-center justify-center p-6 bg-gray-50">
         <h1 className="text-4xl font-extrabold tracking-tight mb-2 text-gray-900">Bagi Duit Lah Bang</h1>
         <p className="text-gray-500 mb-8 text-center max-w-sm">The frictionless way to split bills without the math.</p>
+        
         <div className="flex flex-col gap-4 w-full max-w-xs">
-          <button onClick={loginGoogle} className="flex items-center justify-center gap-3 bg-white text-gray-800 px-6 py-4 rounded-xl font-semibold border border-gray-200 hover:bg-gray-50 shadow-sm">Continue with Google</button>
-          <button onClick={loginAnon} className="bg-black text-white px-6 py-4 rounded-xl font-semibold hover:bg-gray-800 shadow-lg">Continue as Guest</button>
+          {error && <div className="p-3 bg-red-50 text-red-600 rounded-xl text-sm font-medium text-center">{error}</div>}
+          
+          {!showGuestInput ? (
+            <>
+              <button onClick={loginGoogle} className="flex items-center justify-center gap-3 bg-white text-gray-800 px-6 py-4 rounded-xl font-semibold border border-gray-200 hover:bg-gray-50 shadow-sm">
+                Continue with Google
+              </button>
+              <button onClick={() => setShowGuestInput(true)} className="bg-black text-white px-6 py-4 rounded-xl font-semibold hover:bg-gray-800 shadow-lg transition-all">
+                Continue as Guest
+              </button>
+            </>
+          ) : (
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex flex-col gap-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-2 text-center">What should we call you?</label>
+                <input 
+                  type="text" 
+                  value={guestName}
+                  onChange={(e) => setGuestName(e.target.value)}
+                  placeholder="e.g. Ahmad"
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 focus:bg-white focus:ring-2 focus:ring-black outline-none font-medium text-center"
+                  autoFocus
+                  onKeyDown={(e) => e.key === 'Enter' && handleGuestLogin()}
+                />
+              </div>
+              <div className="flex gap-2 mt-2">
+                <button 
+                  onClick={() => { setShowGuestInput(false); setError(''); }} 
+                  className="flex-1 bg-gray-100 text-gray-600 px-4 py-3 rounded-xl font-semibold hover:bg-gray-200 transition-colors"
+                >
+                  Back
+                </button>
+                <button 
+                  onClick={handleGuestLogin} 
+                  disabled={isLoggingIn}
+                  className="flex-1 bg-black text-white px-4 py-3 rounded-xl font-semibold hover:bg-gray-800 transition-colors disabled:bg-gray-400"
+                >
+                  {isLoggingIn ? '...' : 'Join'}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </main>
     );
   }
 
-  // LOBBY VIEW 
+  // Lobby View
   if (insideDashboard && activeRoom && dashboardView === 'lobby') {
     return (
       <main className="min-h-screen bg-gray-50 p-6 flex flex-col pb-24">
         <div className="max-w-md mx-auto w-full">
           
-          {/* Header */}
           <button onClick={handleLeaveRoom} className="mb-4 text-sm font-medium text-gray-500 hover:text-gray-800 flex items-center">
             ← Leave Room
           </button>
@@ -245,7 +313,7 @@ export default function LandingPage() {
               </div>
               <span className="text-xs bg-green-50 text-green-700 font-semibold px-3 py-1.5 rounded-full border border-green-200 flex items-center gap-1.5 shadow-sm">
                 <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></span>
-                5 joined
+                {participants.length} joined
               </span>
             </div>
 
@@ -257,46 +325,41 @@ export default function LandingPage() {
               <button onClick={() => navigator.clipboard.writeText(activeRoom.joinCode)} className="flex-1 border border-gray-200 text-gray-700 hover:bg-gray-50 transition text-xs font-semibold py-2.5 rounded-xl flex items-center justify-center gap-2">
                 ⎘ Copy code
               </button>
-              <button className="flex-1 border border-gray-200 text-gray-700 hover:bg-gray-50 transition text-xs font-semibold py-2.5 rounded-xl flex items-center justify-center gap-2">
-                🔗 Copy link
-              </button>
-              <button className="flex-1 border border-gray-200 text-gray-700 hover:bg-gray-50 transition text-xs font-semibold py-2.5 rounded-xl flex items-center justify-center gap-2">
-                💬 WhatsApp
-              </button>
             </div>
           </div>
 
-          {/* People Section */}
           <div className="mb-6">
             <h2 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3 px-1">People in this room</h2>
             <div className="space-y-2">
-              {mockUsers.map((p) => (
-                <div 
-                  key={p.id} 
-                  className={`flex items-center justify-between p-3 rounded-xl border ${p.isHost ? 'bg-green-50 border-green-200' : 'bg-white border-gray-100 shadow-sm'}`}
-                >
-                  <div className="flex items-center gap-3">
-                    <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm shadow-sm ${p.color}`}>
-                      {p.initials}
+              {participants.map((p) => {
+                const isMe = p.id === user.uid;
+                return (
+                  <div 
+                    key={p.id} 
+                    className={`flex items-center justify-between p-3 rounded-xl border ${isMe ? 'bg-green-50 border-green-200' : 'bg-white border-gray-100 shadow-sm'}`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm shadow-sm ${p.color}`}>
+                        {p.initials}
+                      </div>
+                      <div>
+                        <h3 className={`text-sm font-bold ${isMe ? 'text-gray-900' : 'text-gray-800'}`}>
+                          {p.name} {isMe && <span className="font-normal text-gray-500">(you)</span>}
+                        </h3>
+                        <p className={`text-xs text-gray-500`}>
+                          {p.isHost ? 'Host' : 'via'} · {p.method}
+                        </p>
+                      </div>
                     </div>
-                    <div>
-                      <h3 className={`text-sm font-bold ${p.isHost ? 'text-gray-900' : 'text-gray-800'}`}>
-                        {p.name} {p.isHost && <span className="font-normal text-gray-500">(you)</span>}
-                      </h3>
-                      <p className={`text-xs text-gray-500`}>
-                        {p.isHost ? 'Host' : 'via'} · {p.method}
-                      </p>
+                    <div className={`text-[10px] uppercase tracking-wider font-bold px-2.5 py-1 rounded-full ${p.isHost ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                      {p.isHost ? 'host' : 'joined'}
                     </div>
                   </div>
-                  <div className={`text-[10px] uppercase tracking-wider font-bold px-2.5 py-1 rounded-full ${p.isHost ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
-                    {p.isHost ? 'host' : 'joined'}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 
-          {/* Footer Actions */}
           <div className="mt-8 space-y-3">
             <button 
               onClick={() => setDashboardView('menu')}
@@ -308,34 +371,38 @@ export default function LandingPage() {
               Waiting for more friends...
             </p>
           </div>
-
         </div>
       </main>
     );
   }
 
-  //State 4: Room Dashboard (Order Menu, Scanner, Manual) 
+  // State 4: Room Dashboard (Menu, Scanner, Manual, Claim)
   if (insideDashboard && activeRoom && dashboardView !== 'lobby') {
     return (
       <main className="min-h-screen bg-gray-50 p-6 pb-24">
         <div className="max-w-md mx-auto">
-          <button onClick={() => setDashboardView('lobby')} className="mb-4 text-sm font-medium text-gray-500 hover:text-gray-800 flex items-center">
-            ← Back to Lobby
-          </button>
+          {dashboardView === 'menu' && (
+            <button onClick={() => setDashboardView('lobby')} className="mb-4 text-sm font-medium text-gray-500 hover:text-gray-800 flex items-center">
+              ← Back to Lobby
+            </button>
+          )}
 
-          <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 mb-6">
-            <div className="flex justify-between items-start">
-              <div>
-                <h1 className="text-2xl font-bold text-gray-900">{activeRoom.name}</h1>
-                <p className="text-sm text-gray-500 mt-1">Code: <span className="font-mono font-bold text-gray-800">{activeRoom.joinCode}</span></p>
+          {/* Minimal Header */}
+          {dashboardView === 'menu' && (
+            <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 mb-6">
+              <div className="flex justify-between items-start">
+                <div>
+                  <h1 className="text-2xl font-bold text-gray-900">{activeRoom.name}</h1>
+                  <p className="text-sm text-gray-500 mt-1">Code: <span className="font-mono font-bold text-gray-800">{activeRoom.joinCode}</span></p>
+                </div>
+                <span className="text-xs bg-green-100 text-green-800 font-semibold px-3 py-1 rounded-full">
+                  {activeRoom.hostId === user.uid ? 'Host' : 'Member'}
+                </span>
               </div>
-              <span className="text-xs bg-green-100 text-green-800 font-semibold px-3 py-1 rounded-full">
-                {activeRoom.hostId === user.uid ? 'Host' : 'Member'}
-              </span>
             </div>
-          </div>
+          )}
 
-          {/* VIEW CONTROLLER */}
+          {/* View Controller */}
           {dashboardView === 'menu' && (
             <div className="space-y-4">
               <div className="flex justify-between items-center mb-2">
@@ -349,37 +416,100 @@ export default function LandingPage() {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {orders.map((order) => (
-                    <div 
-                      key={order.id} 
-                      onClick={() => console.log("Clicked order:", order.id)}
-                      className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm flex justify-between items-center cursor-pointer hover:border-blue-400 hover:shadow-md transition-all group"
-                    >
-                      <div>
-                        <h3 className="font-bold text-gray-900 group-hover:text-blue-600 transition-colors">{order.name}</h3>
-                        <p className="text-xs text-gray-500 mt-1">{order.items.length} items</p>
+                  {orders.map((order) => {
+                    const payer = participants.find(p => p.id === order.paidBy)?.name || 'Someone';
+                    return (
+                      <div 
+                        key={order.id} 
+                        onClick={() => {
+                          setSelectedOrderId(order.id!);
+                          setDashboardView('claim');
+                        }}
+                        className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm flex justify-between items-center cursor-pointer hover:border-blue-400 hover:shadow-md transition-all group"
+                      >
+                        <div>
+                          <h3 className="font-bold text-gray-900 group-hover:text-blue-600 transition-colors">{order.name}</h3>
+                          <p className="text-xs text-gray-500 mt-1">Paid by {payer} • {order.items?.length || 0} items</p>
+                        </div>
+                        <div className="text-right flex items-center gap-3">
+                          <div>
+                            <p className="font-bold text-gray-900">RM {order.total.toFixed(2)}</p>
+                            <p className="text-xs text-gray-400 mt-1">Tax: {order.taxPercentage}%</p>
+                          </div>
+                          <span className="text-gray-300 group-hover:text-blue-500 text-lg">›</span>
+                        </div>
                       </div>
-                      <div className="text-right">
-                        <p className="font-bold text-gray-900">RM {order.total.toFixed(2)}</p>
-                        <p className="text-xs text-gray-400 mt-1">Tax: {order.taxPercentage}%</p>
-                      </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
 
               <div className="grid grid-cols-2 gap-3 mt-6">
-                <button onClick={() => setDashboardView('scan')} className="bg-white border border-gray-200 text-gray-800 px-4 py-4 rounded-xl font-semibold hover:bg-gray-50 flex flex-col items-center gap-2 shadow-sm">
+                <button onClick={() => { setDashboardView('scan'); setManualPaidBy(user.uid); }} className="bg-white border border-gray-200 text-gray-800 px-4 py-4 rounded-xl font-semibold hover:bg-gray-50 flex flex-col items-center gap-2 shadow-sm">
                   <span className="text-xl">📷</span> Scan Receipt
                 </button>
-                <button onClick={() => setDashboardView('manual')} className="bg-white border border-gray-200 text-gray-800 px-4 py-4 rounded-xl font-semibold hover:bg-gray-50 flex flex-col items-center gap-2 shadow-sm">
+                <button onClick={() => { setDashboardView('manual'); setManualPaidBy(user.uid); }} className="bg-white border border-gray-200 text-gray-800 px-4 py-4 rounded-xl font-semibold hover:bg-gray-50 flex flex-col items-center gap-2 shadow-sm">
                   <span className="text-xl">✍️</span> Manual Entry
                 </button>
               </div>
             </div>
           )}
 
-          {/* MANUAL ENTRY VIEW */}
+          {/* Claiming View */}
+          {dashboardView === 'claim' && selectedOrderId && (
+            <div className="space-y-4">
+              {orders.filter(o => o.id === selectedOrderId).map(activeOrder => (
+                <div key={activeOrder.id} className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
+                  <div className="flex justify-between items-center mb-6 border-b pb-4">
+                    <div>
+                      <button onClick={() => setDashboardView('menu')} className="text-gray-400 hover:text-gray-800 flex items-center mb-2 text-sm font-semibold">
+                        ← Back to Menu
+                      </button>
+                      <h2 className="text-xl font-bold text-gray-900">{activeOrder.name}</h2>
+                    </div>
+                  </div>
+                  
+                  <div className="space-y-3">
+                    <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Tap an item to claim it</p>
+                    {activeOrder.items?.map((item, idx) => {
+                      const isClaimedByMe = item.claimedBy?.includes(user.uid);
+                      const claimCount = item.claimedBy?.length || 0;
+
+                      return (
+                        <div 
+                          key={idx} 
+                          onClick={() => toggleItemClaim(activeOrder.id!, activeOrder.items, idx, user.uid)}
+                          className={`flex justify-between items-center p-4 rounded-xl border cursor-pointer transition-all ${isClaimedByMe ? 'bg-green-50 border-green-300 shadow-sm' : 'bg-gray-50 border-gray-200 hover:border-gray-300'}`}
+                        >
+                          <div>
+                            <p className={`font-semibold ${isClaimedByMe ? 'text-green-900' : 'text-gray-800'}`}>{item.name}</p>
+                            <div className="flex items-center gap-2 mt-1">
+                              <span className="text-xs text-gray-500">RM {item.price.toFixed(2)}</span>
+                              {claimCount > 0 && (
+                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${isClaimedByMe ? 'bg-green-200 text-green-800' : 'bg-gray-200 text-gray-600'}`}>
+                                  {claimCount} claim{claimCount !== 1 ? 's' : ''}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${isClaimedByMe ? 'bg-green-500 border-green-500 text-white' : 'border-gray-300 bg-white'}`}>
+                            {isClaimedByMe && "✓"}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  <div className="border-t border-gray-100 mt-6 pt-5 flex justify-between items-center text-sm">
+                    <span className="font-semibold text-gray-500">Total (incl. {activeOrder.taxPercentage}% tax)</span>
+                    <span className="font-bold text-gray-900 text-lg">RM {activeOrder.total.toFixed(2)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Manual Entry View */}
           {dashboardView === 'manual' && (
             <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
               <div className="flex justify-between items-center mb-6 border-b pb-4">
@@ -428,6 +558,22 @@ export default function LandingPage() {
                   <button onClick={addManualItemRow} className="mt-3 text-sm font-semibold text-blue-600 hover:text-blue-800">+ Add another item</button>
                 </div>
 
+                {/* NEW: Paid By Selector */}
+                <div className="border-t pt-5 mt-2">
+                  <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Paid By</label>
+                  <select 
+                    value={manualPaidBy || user?.uid || ''}
+                    onChange={(e) => setManualPaidBy(e.target.value)}
+                    className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none font-medium text-gray-900"
+                  >
+                    {participants.map(p => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} {p.id === user?.uid ? '(You)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
                 <div className="border-t pt-5 mt-2">
                   <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Total Tax & Fees (%)</label>
                   <div className="relative">
@@ -453,7 +599,7 @@ export default function LandingPage() {
             </div>
           )}
 
-          {/* SCANNER VIEW */}
+          {/* Scanner View */}
           {dashboardView === 'scan' && (
             <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm text-center">
               <div className="flex justify-between items-center mb-6 border-b pb-4">
@@ -488,7 +634,7 @@ export default function LandingPage() {
     );
   }
 
-  // State 2: Standard Create/Join Menu 
+  // State 2: Standard Create/Join Menu
   return (
     <main className="min-h-screen flex flex-col items-center justify-center p-6 bg-gray-50 relative">
       <div className="absolute top-6 right-6">

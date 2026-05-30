@@ -1,8 +1,7 @@
-import { collection, doc, setDoc, query, where, getDocs, addDoc, onSnapshot, orderBy } from 'firebase/firestore';
+import { collection, doc, setDoc, query, where, getDocs, addDoc, onSnapshot, orderBy, updateDoc } from 'firebase/firestore';
 import { db } from './firebase';
-import { Room, Order } from '../types';
+import { Room, Order, Participant } from '../types';
 
-// Helper function to generate a 5-character alphanumeric code
 const generateRoomCode = () => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   let code = '';
@@ -12,49 +11,59 @@ const generateRoomCode = () => {
   return code;
 };
 
-export async function createRoom(hostId: string, roomName: string): Promise<Room> {
+const generateUserProfile = (user: any, isHost: boolean): Participant => {
+  const name = user.displayName || (user.isAnonymous ? 'Guest' : 'Unknown');
+  const initials = name.split(' ').map((n: string) => n[0]).join('').substring(0, 2).toUpperCase();
+  const colors = ['bg-emerald-600', 'bg-indigo-600', 'bg-orange-500', 'bg-amber-600', 'bg-rose-700', 'bg-blue-600', 'bg-cyan-600'];
+  const color = colors[Math.floor(Math.random() * colors.length)];
+  
+  return {
+    id: user.uid,
+    name,
+    isHost,
+    method: user.isAnonymous ? 'anonymous' : 'Google',
+    initials,
+    color,
+    joinedAt: Date.now()
+  };
+};
+
+export async function createRoom(user: any, roomName: string): Promise<Room> {
   const roomCollectionRef = collection(db, 'rooms');
   let roomCode = generateRoomCode();
   let isUnique = false;
 
-  // Ensure the 5-character code isn't currently being used by another active room
   while (!isUnique) {
-    const q = query(
-      roomCollectionRef, 
-      where('joinCode', '==', roomCode), 
-      where('status', '==', 'active')
-    );
+    const q = query(roomCollectionRef, where('joinCode', '==', roomCode), where('status', '==', 'active'));
     const querySnapshot = await getDocs(q);
     if (querySnapshot.empty) {
       isUnique = true;
     } else {
-      roomCode = generateRoomCode(); // Try again if taken
+      roomCode = generateRoomCode();
     }
   }
 
   const newRoomRef = doc(roomCollectionRef);
-  
   const newRoom: Room = {
     id: newRoomRef.id,
     name: roomName || 'Unnamed Room', 
     joinCode: roomCode,
-    hostId: hostId,
+    hostId: user.uid,
     status: 'active',
     createdAt: Date.now()
   };
 
   await setDoc(newRoomRef, newRoom);
+
+  const participantRef = doc(db, 'rooms', newRoomRef.id, 'participants', user.uid);
+  await setDoc(participantRef, generateUserProfile(user, true));
+
   return newRoom;
 }
 
-export async function joinRoom(joinCode: string): Promise<Room | null> {
+export async function joinRoom(user: any, joinCode: string): Promise<Room | null> {
   const roomCollectionRef = collection(db, 'rooms');
-  const q = query(
-    roomCollectionRef, 
-    where('joinCode', '==', joinCode.toUpperCase()), 
-    where('status', '==', 'active')
-  );
-
+  const q = query(roomCollectionRef, where('joinCode', '==', joinCode.trim().toUpperCase()), where('status', '==', 'active'));
   const querySnapshot = await getDocs(q);
   
   if (querySnapshot.empty) {
@@ -62,36 +71,56 @@ export async function joinRoom(joinCode: string): Promise<Room | null> {
   }
 
   const roomDoc = querySnapshot.docs[0];
-  return roomDoc.data() as Room;
+  const roomData = roomDoc.data() as Room;
+
+  const participantRef = doc(db, 'rooms', roomDoc.id, 'participants', user.uid);
+  await setDoc(participantRef, generateUserProfile(user, false));
+
+  return roomData;
 }
 
-// --- Push orders to the database ---
 export async function createOrder(orderData: Omit<Order, 'id'>): Promise<string> {
   const ordersCollectionRef = collection(db, 'orders');
-  
-  // addDoc automatically generates a unique ID for the new document
   const docRef = await addDoc(ordersCollectionRef, orderData);
-  
   return docRef.id;
 }
 
-// --- NEW: Real-time listener for the Order Menu ---
 export function subscribeToOrders(roomId: string, callback: (orders: Order[]) => void) {
-  const q = query(
-    collection(db, 'orders'),
-    where('roomId', '==', roomId),
-    orderBy('createdAt', 'asc') // Orders them oldest to newest
-  );
-
-  // onSnapshot listens continuously. It triggers the callback every time the database changes.
-  const unsubscribe = onSnapshot(q, (snapshot) => {
-    const fetchedOrders = snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    })) as Order[];
-    
+  const q = query(collection(db, 'orders'), where('roomId', '==', roomId), orderBy('createdAt', 'asc'));
+  return onSnapshot(q, (snapshot) => {
+    const fetchedOrders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Order[];
     callback(fetchedOrders);
   });
+}
 
-  return unsubscribe; // We return this so React can turn off the listener when the user leaves the room
+export function subscribeToParticipants(roomId: string, callback: (participants: Participant[]) => void) {
+  const q = query(collection(db, 'rooms', roomId, 'participants'), orderBy('joinedAt', 'asc'));
+  return onSnapshot(q, (snapshot) => {
+    const fetchedParticipants = snapshot.docs.map(doc => doc.data() as Participant);
+    callback(fetchedParticipants);
+  });
+}
+
+// --- NEW: Toggle an item's claim status ---
+export async function toggleItemClaim(orderId: string, items: any[], itemIndex: number, userId: string) {
+  const orderRef = doc(db, 'orders', orderId);
+  const newItems = [...items];
+  
+  // Failsafe in case older items don't have the array yet
+  if (!newItems[itemIndex].claimedBy) {
+    newItems[itemIndex].claimedBy = [];
+  }
+  
+  const hasClaimed = newItems[itemIndex].claimedBy.includes(userId);
+  
+  if (hasClaimed) {
+    // Unclaim it: Filter the user ID out
+    newItems[itemIndex].claimedBy = newItems[itemIndex].claimedBy.filter((id: string) => id !== userId);
+  } else {
+    // Claim it: Push the user ID in
+    newItems[itemIndex].claimedBy.push(userId);
+  }
+  
+  // Update the entire items array in Firestore instantly
+  await updateDoc(orderRef, { items: newItems });
 }
