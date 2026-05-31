@@ -5,8 +5,7 @@ import { useAuth } from '../hooks/useAuth';
 import { createRoom, joinRoom, createOrder, subscribeToOrders, subscribeToParticipants, toggleItemClaim, closeRoom, subscribeToRoom, markDebtSettled } from '../lib/roomOps';
 import { Room, Order, Participant } from '../types';
 import { getAuth, updateProfile } from 'firebase/auth'; 
-import html2canvas from 'html2canvas'; // NEW
-import jsPDF from 'jspdf'; // NEW
+import { toPng } from 'html-to-image';
 
 export default function LandingPage() {
   const { user, loading, loginAnon, loginGoogle, logout } = useAuth();
@@ -130,29 +129,25 @@ export default function LandingPage() {
     return { balances: finalBalances, transactions };
   };
 
-  // NEW: PDF Export Function
-  const exportToPDF = async () => {
+  // Export Summary
+  const downloadScreenshot = async () => {
     if (!summaryRef.current) return;
     setIsExporting(true);
     
     try {
-      const canvas = await html2canvas(summaryRef.current, {
-        scale: 2, 
-        useCORS: true, 
-        backgroundColor: '#f9fafb' // Matches bg-gray-50
+      const dataUrl = await toPng(summaryRef.current, {
+        quality: 1,
+        backgroundColor: '#f9fafb' 
       });
       
-      const imgData = canvas.toDataURL('image/png');
-      const pdf = new jsPDF('p', 'mm', 'a4');
+      const link = document.createElement('a');
+      link.download = `BagiDuit_Split_${activeRoom?.name || 'Summary'}.png`;
+      link.href = dataUrl;
+      link.click();
       
-      const pdfWidth = pdf.internal.pageSize.getWidth();
-      const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
-      
-      pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
-      pdf.save(`BagiDuit_${activeRoom?.name || 'Summary'}.pdf`);
     } catch (err) {
-      console.error("Failed to export PDF:", err);
-      alert("Something went wrong while generating the PDF.");
+      console.error("Failed to export screenshot:", err);
+      alert("Something went wrong while generating the image.");
     } finally {
       setIsExporting(false);
     }
@@ -434,13 +429,13 @@ export default function LandingPage() {
               ← {activeRoom.status === 'closed' ? 'Exit Session' : 'Back to Menu'}
             </button>
 
-            {/*PDF Export Button */}
+            {/* Export Summary Button */}
             <button 
-              onClick={exportToPDF}
+              onClick={downloadScreenshot}
               disabled={isExporting}
               className="text-sm font-bold bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded-lg shadow-sm hover:bg-gray-50 disabled:opacity-50"
             >
-              {isExporting ? 'Generating...' : '↓ Export PDF'}
+              {isExporting ? 'Generating...' : '↓ Save Summary'}
             </button>
           </div>
 
@@ -938,14 +933,14 @@ export default function LandingPage() {
         <button onClick={logout} className="text-sm font-medium text-red-500 hover:text-red-700">Sign Out</button>
       </div>
 
-      <div className="mb-6 text-center animate-in fade-in slide-in-from-bottom-2 duration-500">
-        <h1 className="text-2xl font-bold text-gray-900">
-          Hi, {user.displayName?.split(' ')[0] || guestName || 'Guest'} 
-        </h1>
-      </div>
-
       <div className="w-full max-w-md bg-white p-8 rounded-2xl shadow-sm border border-gray-100">
         {error && <div className="mb-4 p-3 bg-red-50 text-red-600 rounded-xl text-sm font-medium text-center">{error}</div>}
+
+        <div className="mb-6 text-center animate-in fade-in slide-in-from-bottom-2 duration-500">
+        <h1 className="text-2xl font-bold text-gray-900">
+          Hi, {user.displayName || guestName || 'Guest'} 
+        </h1>
+        </div>
 
         <div className="mb-8 text-center">
           <h2 className="text-xl font-bold mb-4">Start a new session</h2>
