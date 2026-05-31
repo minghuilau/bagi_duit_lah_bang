@@ -938,6 +938,12 @@ export default function LandingPage() {
         <button onClick={logout} className="text-sm font-medium text-red-500 hover:text-red-700">Sign Out</button>
       </div>
 
+      <div className="mb-6 text-center animate-in fade-in slide-in-from-bottom-2 duration-500">
+        <h1 className="text-2xl font-bold text-gray-900">
+          Hi, {user.displayName?.split(' ')[0] || guestName || 'Guest'} 
+        </h1>
+      </div>
+
       <div className="w-full max-w-md bg-white p-8 rounded-2xl shadow-sm border border-gray-100">
         {error && <div className="mb-4 p-3 bg-red-50 text-red-600 rounded-xl text-sm font-medium text-center">{error}</div>}
 
