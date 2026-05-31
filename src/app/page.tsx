@@ -5,6 +5,8 @@ import { useAuth } from '../hooks/useAuth';
 import { createRoom, joinRoom, createOrder, subscribeToOrders, subscribeToParticipants, toggleItemClaim, closeRoom, subscribeToRoom, markDebtSettled } from '../lib/roomOps';
 import { Room, Order, Participant } from '../types';
 import { getAuth, updateProfile } from 'firebase/auth'; 
+import html2canvas from 'html2canvas'; // NEW
+import jsPDF from 'jspdf'; // NEW
 
 export default function LandingPage() {
   const { user, loading, loginAnon, loginGoogle, logout } = useAuth();
@@ -40,6 +42,10 @@ export default function LandingPage() {
   const [guestName, setGuestName] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
+  // NEW: PDF Export States
+  const summaryRef = useRef<HTMLDivElement>(null);
+  const [isExporting, setIsExporting] = useState(false);
+
   // Real-time Sync
   useEffect(() => {
     if (insideDashboard && activeRoom) {
@@ -47,8 +53,6 @@ export default function LandingPage() {
       const unsubParts = subscribeToParticipants(activeRoom.id, setParticipants);
       const unsubRoom = subscribeToRoom(activeRoom.id, (updatedRoom) => {
         setActiveRoom(updatedRoom);
-        // We no longer force everyone to the summary page immediately, 
-        // they can navigate there naturally using the new Settle Up button.
       });
       
       return () => {
@@ -124,6 +128,34 @@ export default function LandingPage() {
     }
 
     return { balances: finalBalances, transactions };
+  };
+
+  // NEW: PDF Export Function
+  const exportToPDF = async () => {
+    if (!summaryRef.current) return;
+    setIsExporting(true);
+    
+    try {
+      const canvas = await html2canvas(summaryRef.current, {
+        scale: 2, 
+        useCORS: true, 
+        backgroundColor: '#f9fafb' // Matches bg-gray-50
+      });
+      
+      const imgData = canvas.toDataURL('image/png');
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
+      
+      pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+      pdf.save(`BagiDuit_${activeRoom?.name || 'Summary'}.pdf`);
+    } catch (err) {
+      console.error("Failed to export PDF:", err);
+      alert("Something went wrong while generating the PDF.");
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   // Functions
@@ -393,140 +425,155 @@ export default function LandingPage() {
     return (
       <main className="min-h-screen bg-gray-50 p-6 pb-24">
         <div className="max-w-md mx-auto">
-          <button 
-            onClick={() => activeRoom.status === 'closed' ? handleLeaveRoom() : setDashboardView('menu')} 
-            className="mb-4 text-sm font-medium text-gray-500 hover:text-gray-800 flex items-center"
-          >
-            ← {activeRoom.status === 'closed' ? 'Exit Session' : 'Back to Menu'}
-          </button>
+          
+          <div className="flex justify-between items-center mb-4">
+            <button 
+              onClick={() => activeRoom.status === 'closed' ? handleLeaveRoom() : setDashboardView('menu')} 
+              className="text-sm font-medium text-gray-500 hover:text-gray-800 flex items-center"
+            >
+              ← {activeRoom.status === 'closed' ? 'Exit Session' : 'Back to Menu'}
+            </button>
 
-          <div className="bg-white rounded-2xl p-8 shadow-sm border border-gray-100 mb-6 text-center">
-            {activeRoom.status === 'closed' ? (
-              <span className="text-xs bg-gray-100 text-gray-500 font-bold px-3 py-1.5 rounded-full tracking-wider uppercase">
-                Session Closed
-              </span>
-            ) : (
-              <span className="text-xs bg-blue-100 text-blue-700 font-bold px-3 py-1.5 rounded-full tracking-wider uppercase flex items-center justify-center gap-1.5 w-max mx-auto">
-                <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse"></span>
-                Live Split
-              </span>
-            )}
-            <h1 className="text-3xl font-black text-gray-900 mt-4 mb-2">Final Split</h1>
-            <p className="text-gray-500 text-sm">All taxes and items have been calculated.</p>
-            
-            <div className="mt-8 pt-8 border-t border-gray-100">
-              <p className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-2">Your Summary</p>
-              {myBalance && myBalance.net < -0.01 ? (
-                <div>
-                  <p className="text-4xl font-black text-red-500 mb-1">RM {Math.abs(myBalance.net).toFixed(2)}</p>
-                  <p className="text-sm text-gray-500 font-medium">Total amount you owe</p>
-                </div>
-              ) : myBalance && myBalance.net > 0.01 ? (
-                <div>
-                  <p className="text-4xl font-black text-green-500 mb-1">RM {myBalance.net.toFixed(2)}</p>
-                  <p className="text-sm text-gray-500 font-medium">Total amount you receive</p>
-                </div>
-              ) : (
-                <div>
-                  <p className="text-4xl font-black text-gray-800 mb-1">RM 0.00</p>
-                  <p className="text-sm text-gray-500 font-medium">You are perfectly settled up</p>
-                </div>
-              )}
-              
-              {myBalance && (
-                <div className="flex justify-between items-center bg-gray-50 p-4 rounded-xl mt-6 text-sm">
-                  <div className="text-left">
-                    <p className="text-gray-500">You consumed</p>
-                    <p className="font-bold text-gray-900">RM {myBalance.consumed.toFixed(2)}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-gray-500">You paid upfront</p>
-                    <p className="font-bold text-gray-900">RM {myBalance.paid.toFixed(2)}</p>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* NEW: Host Lock Button moved inside Summary */}
-            {activeRoom.status === 'active' && activeRoom.hostId === user.uid && (
-              <div className="mt-8 pt-6 border-t border-gray-100">
-                <button 
-                  onClick={handleCloseSession}
-                  disabled={isClosing}
-                  className="w-full bg-red-600 text-white px-6 py-4 rounded-xl font-bold hover:bg-red-700 transition-colors shadow-sm disabled:bg-red-400"
-                >
-                  {isClosing ? 'Locking Room...' : 'Lock Room & Finalize'}
-                </button>
-                <p className="text-center text-xs text-gray-400 mt-2">This prevents anyone from adding more items.</p>
-              </div>
-            )}
+            {/*PDF Export Button */}
+            <button 
+              onClick={exportToPDF}
+              disabled={isExporting}
+              className="text-sm font-bold bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded-lg shadow-sm hover:bg-gray-50 disabled:opacity-50"
+            >
+              {isExporting ? 'Generating...' : '↓ Export PDF'}
+            </button>
           </div>
 
-          {/* Settle Up Instructions */}
-          {transactions.length > 0 && (
-            <div className="mb-8">
-              <h2 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3 px-1">How to Settle Up</h2>
-              <div className="space-y-3">
-                {transactions.map((tx, idx) => {
-                  const txId = `${tx.fromId}_${tx.toId}_${idx}`;
-                  const isSettled = activeRoom.settledDebts?.includes(txId);
-                  const amIInvolved = tx.fromId === user.uid || tx.toId === user.uid;
-                  
-                  return (
-                    <div key={idx} className={`bg-white p-5 rounded-2xl shadow-sm border ${amIInvolved && !isSettled ? 'border-blue-300 ring-2 ring-blue-50' : 'border-gray-100'} flex justify-between items-center transition-all ${isSettled ? 'opacity-50 grayscale' : ''}`}>
-                      <div className="flex items-center gap-3">
-                        <div className="flex-1">
-                          <p className={`font-medium ${isSettled ? 'text-gray-500 line-through' : 'text-gray-900'}`}>
-                            <span className={tx.fromId === user.uid && !isSettled ? "font-bold text-blue-600" : "font-bold"}>{tx.fromName}</span> pays <span className={tx.toId === user.uid && !isSettled ? "font-bold text-blue-600" : "font-bold"}>{tx.toName}</span>
-                          </p>
+          {/* NEW: We wrap the content we want to screenshot in this ref */}
+          <div ref={summaryRef} className="bg-gray-50 p-2 -m-2 rounded-2xl">
+            <div className="bg-white rounded-2xl p-8 shadow-sm border border-gray-100 mb-6 text-center">
+              {activeRoom.status === 'closed' ? (
+                <span className="text-xs bg-gray-100 text-gray-500 font-bold px-3 py-1.5 rounded-full tracking-wider uppercase">
+                  Session Closed
+                </span>
+              ) : (
+                <span className="text-xs bg-blue-100 text-blue-700 font-bold px-3 py-1.5 rounded-full tracking-wider uppercase flex items-center justify-center gap-1.5 w-max mx-auto">
+                  <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse"></span>
+                  Live Split
+                </span>
+              )}
+              <h1 className="text-3xl font-black text-gray-900 mt-4 mb-2">{activeRoom.name || 'Final Split'}</h1>
+              <p className="text-gray-500 text-sm">All taxes and items have been calculated.</p>
+              
+              <div className="mt-8 pt-8 border-t border-gray-100">
+                <p className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-2">Your Summary</p>
+                {myBalance && myBalance.net < -0.01 ? (
+                  <div>
+                    <p className="text-4xl font-black text-red-500 mb-1">RM {Math.abs(myBalance.net).toFixed(2)}</p>
+                    <p className="text-sm text-gray-500 font-medium">Total amount you owe</p>
+                  </div>
+                ) : myBalance && myBalance.net > 0.01 ? (
+                  <div>
+                    <p className="text-4xl font-black text-green-500 mb-1">RM {myBalance.net.toFixed(2)}</p>
+                    <p className="text-sm text-gray-500 font-medium">Total amount you receive</p>
+                  </div>
+                ) : (
+                  <div>
+                    <p className="text-4xl font-black text-gray-800 mb-1">RM 0.00</p>
+                    <p className="text-sm text-gray-500 font-medium">You are perfectly settled up</p>
+                  </div>
+                )}
+                
+                {myBalance && (
+                  <div className="flex justify-between items-center bg-gray-50 p-4 rounded-xl mt-6 text-sm">
+                    <div className="text-left">
+                      <p className="text-gray-500">You consumed</p>
+                      <p className="font-bold text-gray-900">RM {myBalance.consumed.toFixed(2)}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-gray-500">You paid upfront</p>
+                      <p className="font-bold text-gray-900">RM {myBalance.paid.toFixed(2)}</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Host Lock Button - hidden during PDF export to keep it clean */}
+              {!isExporting && activeRoom.status === 'active' && activeRoom.hostId === user.uid && (
+                <div className="mt-8 pt-6 border-t border-gray-100">
+                  <button 
+                    onClick={handleCloseSession}
+                    disabled={isClosing}
+                    className="w-full bg-red-600 text-white px-6 py-4 rounded-xl font-bold hover:bg-red-700 transition-colors shadow-sm disabled:bg-red-400"
+                  >
+                    {isClosing ? 'Locking Room...' : 'Lock Room & Finalize'}
+                  </button>
+                  <p className="text-center text-xs text-gray-400 mt-2">This prevents anyone from adding more items.</p>
+                </div>
+              )}
+            </div>
+
+            {/* Settle Up Instructions */}
+            {transactions.length > 0 && (
+              <div className="mb-8">
+                <h2 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3 px-1">How to Settle Up</h2>
+                <div className="space-y-3">
+                  {transactions.map((tx, idx) => {
+                    const txId = `${tx.fromId}_${tx.toId}_${idx}`;
+                    const isSettled = activeRoom.settledDebts?.includes(txId);
+                    const amIInvolved = tx.fromId === user.uid || tx.toId === user.uid;
+                    
+                    return (
+                      <div key={idx} className={`bg-white p-5 rounded-2xl shadow-sm border ${amIInvolved && !isSettled ? 'border-blue-300 ring-2 ring-blue-50' : 'border-gray-100'} flex justify-between items-center transition-all ${isSettled ? 'opacity-50 grayscale' : ''}`}>
+                        <div className="flex items-center gap-3">
+                          <div className="flex-1">
+                            <p className={`font-medium ${isSettled ? 'text-gray-500 line-through' : 'text-gray-900'}`}>
+                              <span className={tx.fromId === user.uid && !isSettled ? "font-bold text-blue-600" : "font-bold"}>{tx.fromName}</span> pays <span className={tx.toId === user.uid && !isSettled ? "font-bold text-blue-600" : "font-bold"}>{tx.toName}</span>
+                            </p>
+                          </div>
+                        </div>
+                        <div className="text-right flex items-center gap-4">
+                          <span className={`font-black text-lg ${isSettled ? 'text-gray-400' : 'text-gray-900'}`}>RM {tx.amount.toFixed(2)}</span>
+                          
+                          {!isExporting && !isSettled && (amIInvolved || activeRoom.hostId === user.uid) && (
+                            <button 
+                              onClick={() => markDebtSettled(activeRoom.id, txId)}
+                              className="bg-green-100 text-green-700 hover:bg-green-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors"
+                            >
+                              Mark Paid
+                            </button>
+                          )}
+                          {isSettled && (
+                            <span className="text-green-600 font-bold text-sm flex items-center gap-1">
+                              ✓ Paid
+                            </span>
+                          )}
                         </div>
                       </div>
-                      <div className="text-right flex items-center gap-4">
-                        <span className={`font-black text-lg ${isSettled ? 'text-gray-400' : 'text-gray-900'}`}>RM {tx.amount.toFixed(2)}</span>
-                        
-                        {!isSettled && (amIInvolved || activeRoom.hostId === user.uid) && (
-                          <button 
-                            onClick={() => markDebtSettled(activeRoom.id, txId)}
-                            className="bg-green-100 text-green-700 hover:bg-green-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors"
-                          >
-                            Mark Paid
-                          </button>
-                        )}
-                        {isSettled && (
-                          <span className="text-green-600 font-bold text-sm flex items-center gap-1">
-                            ✓ Paid
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          <h2 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3 px-1">Group Ledger</h2>
-          <div className="space-y-3">
-            {finalBalances.map((balance) => {
-              const isMe = balance.userId === user.uid;
-              return (
-                <div key={balance.userId} className={`bg-white p-5 rounded-2xl shadow-sm border ${isMe ? 'border-gray-300 ring-2 ring-gray-100' : 'border-gray-100'} flex justify-between items-center`}>
-                  <div>
-                    <h3 className="font-bold text-gray-900">{balance.name} {isMe && <span className="text-gray-400 font-normal">(You)</span>}</h3>
-                    <p className="text-xs text-gray-500 mt-0.5">Consumed RM {balance.consumed.toFixed(2)}</p>
-                  </div>
-                  <div className="text-right">
-                    {balance.net > 0.01 ? (
-                      <span className="text-green-600 font-bold bg-green-50 px-3 py-1 rounded-lg text-sm">Receives RM {balance.net.toFixed(2)}</span>
-                    ) : balance.net < -0.01 ? (
-                      <span className="text-red-500 font-bold bg-red-50 px-3 py-1 rounded-lg text-sm">Owes RM {Math.abs(balance.net).toFixed(2)}</span>
-                    ) : (
-                      <span className="text-gray-400 font-bold bg-gray-50 px-3 py-1 rounded-lg text-sm">Settled</span>
-                    )}
-                  </div>
+                    );
+                  })}
                 </div>
-              );
-            })}
+              </div>
+            )}
+
+            <h2 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3 px-1">Group Ledger</h2>
+            <div className="space-y-3">
+              {finalBalances.map((balance) => {
+                const isMe = balance.userId === user.uid;
+                return (
+                  <div key={balance.userId} className={`bg-white p-5 rounded-2xl shadow-sm border ${isMe ? 'border-gray-300 ring-2 ring-gray-100' : 'border-gray-100'} flex justify-between items-center`}>
+                    <div>
+                      <h3 className="font-bold text-gray-900">{balance.name} {isMe && <span className="text-gray-400 font-normal">(You)</span>}</h3>
+                      <p className="text-xs text-gray-500 mt-0.5">Consumed RM {balance.consumed.toFixed(2)}</p>
+                    </div>
+                    <div className="text-right">
+                      {balance.net > 0.01 ? (
+                        <span className="text-green-600 font-bold bg-green-50 px-3 py-1 rounded-lg text-sm">Receives RM {balance.net.toFixed(2)}</span>
+                      ) : balance.net < -0.01 ? (
+                        <span className="text-red-500 font-bold bg-red-50 px-3 py-1 rounded-lg text-sm">Owes RM {Math.abs(balance.net).toFixed(2)}</span>
+                      ) : (
+                        <span className="text-gray-400 font-bold bg-gray-50 px-3 py-1 rounded-lg text-sm">Settled</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       </main>
