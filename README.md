@@ -40,3 +40,9 @@ src/
  │    └── roomOps.ts               # Firebase transactional database execution wrappers
  └── types/
       └── index.ts                 # Shared Type definitions (Room, Order, Participant)
+```
+
+---
+
+## 📖 Technical Documentation
+To read about the system planning, architectural decisions, and data flowcharts, check out the [Technical Documentation](./DOCUMENTATION.md).
