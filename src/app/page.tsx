@@ -41,7 +41,7 @@ export default function LandingPage() {
   const [guestName, setGuestName] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-  // NEW: PDF Export States
+  // PDF Export States
   const summaryRef = useRef<HTMLDivElement>(null);
   const [isExporting, setIsExporting] = useState(false);
 
@@ -322,9 +322,17 @@ export default function LandingPage() {
           body: JSON.stringify({ base64Image: base64String, mimeType: file.type })
         });
 
-        const data = await response.json();
+        let data: any = null;
+        const contentType = response.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          try {
+            data = await response.json();
+          } catch (jsonErr) {
+            console.error("Failed to parse response JSON context:", jsonErr);
+          }
+        }
         
-        if (response.ok) {
+        if (response.ok && data) {
           let safeItems = [{ name: '', price: '' }]; 
           if (data && Array.isArray(data.items)) {
             safeItems = data.items;
@@ -337,11 +345,12 @@ export default function LandingPage() {
           setManualPaidBy(user?.uid || '');
           setDashboardView('manual');
         } else {
-          console.error("Scanning failed:", data?.error || 'Unknown error');
+          console.error("Scanning failed:", data?.error || 'Server returned invalid data or error response');
           alert("Failed to read receipt clearly. Try again!");
         }
       } catch (err) {
-        console.error("API error:", err);
+        console.error("API network configuration error:", err);
+        alert("Could not link safely with receipt scanning processing systems.");
       } finally {
         setIsScanning(false);
         if (fileInputRef.current) fileInputRef.current.value = '';
@@ -753,7 +762,11 @@ export default function LandingPage() {
                     <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Tap an item to claim it</p>
                     {activeOrder.items?.map((item, idx) => {
                       const isClaimedByMe = item.claimedBy?.includes(user.uid);
-                      const claimCount = item.claimedBy?.length || 0;
+                      
+                      // Grab user profile contexts for everyone who claimed this item
+                      const claimers = (item.claimedBy || [])
+                        .map(uid => participants.find(p => p.id === uid))
+                        .filter(Boolean) as Participant[];
 
                       return (
                         <div 
@@ -765,13 +778,24 @@ export default function LandingPage() {
                             <p className={`font-semibold ${isClaimedByMe ? 'text-green-900' : 'text-gray-800'}`}>{item.name}</p>
                             <div className="flex items-center gap-2 mt-1">
                               <span className="text-xs text-gray-500">RM {item.price.toFixed(2)}</span>
-                              {claimCount > 0 && (
-                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${isClaimedByMe ? 'bg-green-200 text-green-800' : 'bg-gray-200 text-gray-600'}`}>
-                                  {claimCount} claim{claimCount !== 1 ? 's' : ''}
-                                </span>
+                              
+                              {/* Overlapping colored avatar bubbles for each claimer with tactile pop animation */}
+                              {claimers.length > 0 && (
+                                <div className="flex items-center -space-x-1.5 ml-1">
+                                  {claimers.map((claimer, cIdx) => (
+                                    <div 
+                                      key={cIdx} 
+                                      className={`w-5 h-5 rounded-full flex items-center justify-center text-white font-bold text-[9px] shadow-sm ring-2 ${isClaimedByMe ? 'ring-green-50' : 'ring-white'} ${claimer.color} animate-in zoom-in fade-in slide-in-from-right-2 duration-300 ease-out`}
+                                      title={claimer.name}
+                                    >
+                                      {claimer.initials}
+                                    </div>
+                                  ))}
+                                </div>
                               )}
                             </div>
                           </div>
+                          
                           <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${isClaimedByMe ? 'bg-green-500 border-green-500 text-white' : 'border-gray-300 bg-white'}`}>
                             {isClaimedByMe && "✓"}
                           </div>
@@ -821,7 +845,7 @@ export default function LandingPage() {
                           onChange={(e) => updateManualItem(idx, 'name', e.target.value)}
                           className="flex-1 px-3 py-2 rounded-lg border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none text-sm"
                         />
-                        <div className="relative w-24">
+                        <div className="relative w-32 flex-shrink-0">
                           <span className="absolute left-3 top-2.5 text-gray-400 text-sm">RM</span>
                           <input 
                             type="number" 
@@ -938,7 +962,7 @@ export default function LandingPage() {
 
         <div className="mb-6 text-center animate-in fade-in slide-in-from-bottom-2 duration-500">
         <h1 className="text-2xl font-bold text-gray-900">
-          Hi, {user.displayName || guestName || 'Guest'} 
+          Hi, {user.displayName || guestName || 'Guest'} !
         </h1>
         </div>
 
