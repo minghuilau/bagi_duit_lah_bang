@@ -35,12 +35,31 @@ To maintain an architectural standard of **high cohesion and low coupling**, the
 ```mermaid
 graph TD
     A[User Opens App] --> B{Has Room Code?}
-    B -->|No| C[Enter Session Name -> Create Room]
-    B -->|Yes| D[Enter Code -> Join Room]
+    
+    %% Room Setup
+    B -->|No / Host| C[Enter Session Name -> Create Room]
+    B -->|Yes / Guest| D[Enter Code -> Join Room]
     C --> E[Firestore Generates Room Token]
-    D --> F[Listen to Live Firestore Subscriptions]
-    E --> F
-    F --> G[Live UI Updates: Users, Claims & Receipts]
+    
+    %% Real-Time Core Sync
+    E --> F[Listen to Live Firestore Subscriptions]
+    D --> F
+    F --> G[State Orchestrator: Sync Users & Claims]
+    
+    %% Receipt Input Paths
+    G --> H{Add Bill Items}
+    H -->|Manual Input| I[Type Items & Tax Multipliers]
+    H -->|AI Scanner| J[Upload Receipt Image]
+    J --> K[Gemini Flash Extracts Items & Costs via Context]
+    
+    %% Live Update Loop
+    I --> L[Update Firestore Ledger]
+    K --> L
+    L -->|Real-Time Broadcast| F
+    
+    %% Claiming & Settlement
+    G --> M[Live UI: Friends Claim Items in Real-Time]
+    M --> N[Optimize P2P Debts & Generate Summary]
 ```
 ##  5. Tech Stack Summary
 
