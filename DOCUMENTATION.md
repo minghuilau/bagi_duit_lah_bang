@@ -25,7 +25,6 @@ To maintain an architectural standard of **high cohesion and low coupling**, the
 
 * **State Orchestration (`src/app/page.tsx`):** Acts as the central "traffic cop" or router. It maintains the core state machines (`activeRoom`, `participants`, `orders`) and determines which view wrapper to display.
 * **Real-Time Data Layer (`src/lib/roomOps.ts`):** Contains pure database transactions. No UI code lives here. It handles state mutations safely inside Firebase transactions.
-* **Decoupled Components (`src/components/`):** View layers are explicitly separated into isolated modules (`AuthScreen`, `DashboardScreen`, `SummaryScreen`). This guarantees that minor typing inputs inside a form do not force heavy re-renders across the rest of the application tree.
 
 ---
 
