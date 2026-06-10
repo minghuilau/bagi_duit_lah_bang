@@ -33,7 +33,6 @@ src/
  │    │         └── route.ts       # Gemini API processing backend
  │    ├── page.tsx                 # Core View router and state manager
  │    └── layout.tsx
- ├── components/                   # Extended design elements 
  ├── hooks/
  │    └── useAuth.ts               # Custom authentication handler
  ├── lib/
